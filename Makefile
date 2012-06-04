@@ -1,6 +1,9 @@
-DMD=dmd
+GDC=gdc
 
-all: bcdgen
+all: rebound
 
-bcdgen: src/rebound.d
-	$(DMD) -g src/rebound.d -ofbuild/rebound
+rebound: src/program.d src/generator.d
+	cd build; $(GDC) -g ../src/program.d ../src/generator.d -orebound
+
+generator: src/generator.d
+	cd build; $(GDC) -g -fversion=Standalone ../src/generator.d -ogenerator
