@@ -31,18 +31,23 @@ version(Standalone)
 {
 	int main(string[] args)
 	{
-		if(args.length != 2)
+		if(args.length != 3)
 		{
 			writefln("usage: generator xmlfile headerfile");
 			return 1;
 		}
 		
-		string xmlFile = args[0];
-		string headerFile = args[1];
+		string xmlFile = args[1];
+		string headerFile = args[2];
 
 		Generator g = new Generator(xmlFile, headerFile);
-
-		// TODO: Print output.		
+		g.generate();
+		writefln("// Generated output");
+	
+		foreach(TypeDefinition definition; g.types)
+		{
+			writefln(definition.code);
+		}		
 		
 		return 0;
 	}
@@ -66,10 +71,20 @@ public:
 			if(shouldParse(element))
 			{
 				parseElement(element);
+				
+				if(element.tag.attr["id"] in m_definitionMap)
+				{
+					m_types ~= m_definitionMap[element.tag.attr["id"]];
+				}
 			}
 		}
 		
-		// TODO: put together an array of types contained in the header file.
+		// TODO: sort types array.
+	}
+
+	@property TypeDefinition[] types()
+	{
+		return m_types;	
 	}
 
 private:
@@ -78,6 +93,7 @@ private:
 	Element m_fileElement;
 	string m_headerFile;
 	TypeDefinition[string] m_definitionMap;
+	TypeDefinition[] m_types;
 	
 	void initialiseElementMap()
 	{
@@ -110,50 +126,55 @@ private:
 		return value;
 	}
 	
+	string getName(Element element)
+	{
+		if("name" in element.tag.attr)
+		{
+			return element.tag.attr["name"];
+		}
+	
+		return safeName(element.tag.attr["mangled"]);
+	}
+	
+	string[] getMembers(Element element)
+	{
+		string[] members;
+		
+		if("members" in element.tag.attr)
+		{
+			members = split(element.tag.attr["members"]);
+		}
+		
+		return members;
+	}
+	
 	bool shouldParse(Element element)
 	{
 		// TODO: Check to see if it is already in the type definition map.
 		// TODO: Check the node type to see if it is one of the top level types we want to deal with.
+		// NOTE: Don't parse types that don't make sense in C (e.g. constructors and destructors).
 	
 		if("incomplete" in element.tag.attr)
 		{
 			return false;
 		}
 		
-		if("file" in element.tag.attr)
+		if(!("file" in element.tag.attr))
 		{
-			return element.tag.attr["file"] == m_fileElement.tag.attr["id"];
+			return false;
+		}
+		
+		if(element.tag.attr["file"] != m_fileElement.tag.attr["id"])
+		{
+			return false;
+		}
+		
+		if("name" in element.tag.attr)
+		{
+			return true;
 		}
 		
 		return false;
-	}
-	
-	void parseElement(Element element)
-	{
-		// NOTE: Don't parse types that don't make sense in C (e.g. constructors and destructors).
-	
-		switch(element.tag.name)
-		{
-            case "Enumeration":
-                
-				break;
-            
-			case "Struct":
-			case "Union":
-                
-				break;
-				
-            case "Function":
-			    parseFunction(element);
-				break;
-			
-			case "Typedef":
-			    
-				break;
-
-			default:
-				break;
-		}	
 	}
 	
 	TypeDefinition getType(string id)
@@ -163,13 +184,13 @@ private:
 			return m_definitionMap[id];
 		}
 		
-		assert(id in m_elementMap, "Type id is not contained in the element map.");
-		parseType(m_elementMap[id]);
-		assert(id in m_definitionMap, "Type id is not contained in the type definition map.");
+		assert(id in m_elementMap, format("Type id %s is not contained in the element map.", id));
+		parseElement(m_elementMap[id]);
+		assert(id in m_definitionMap, format("Type id %s is not contained in the type definition map.", id));
 		return m_definitionMap[id];
 	}
 
-	void parseType(Element element)
+	void parseElement(Element element)
 	{
 		switch(element.tag.name)
 		{
@@ -178,7 +199,7 @@ private:
 				break;
 
 			case "PointerType":
-
+				parsePointerType(element);
 				break;
 
 			case "ArrayType":
@@ -190,19 +211,19 @@ private:
 				break;
 				
 			case "CvQualifiedType":
-			
-			break;
+				parseCvQualifiedType(element);
+				break;
 			
 			case "FunctionType":
 				break;
 			
             case "Enumeration":
-                
+                parseEnumeration(element);
 				break;
             
 			case "Struct":
 			case "Union":
-                
+                parseStruct(element);
 				break;
 				
             case "Function":
@@ -214,7 +235,7 @@ private:
 				break;
 
 			default:
-				// writefln("I don't know how to parse the type %s.", nname);
+				writefln("I don't know how to parse the element %s.", element.tag.name);
 				break;
 		}	
 	}
@@ -229,6 +250,7 @@ private:
 			{
 				auto td = new TypeDefinition(element, typename[1]);
 				m_definitionMap[element.tag.attr["id"]] = td;
+				return;
 			}
 		}
 		
@@ -237,11 +259,83 @@ private:
 	
 	void parseFunction(Element element)
 	{
-	
-	
+
 	}
 	
+	void parseEnumeration(Element element)
+	{
+		string code = format("enum %s {\n", safeName(element.tag.attr["name"]));
+		
+		foreach(Element enumValue; element.elements)
+		{
+			if(enumValue.tag.name != "EnumValue")
+			{
+				continue;
+			}
+			
+			code ~= format("\t%s = %s,\n", safeName(enumValue.tag.attr["name"]), enumValue.tag.attr["init"]);
+		}
+		
+		code ~= "}\n";
+		
+		auto td = new TypeDefinition(element, code);
+		m_definitionMap[td.id] = td;
+	}
 	
+	void parsePointerType(Element element)
+	{
+		TypeDefinition baseType = getType(element.tag.attr["type"]);
+		string code = format("%s *", baseType.code);
+		auto td = new TypeDefinition(element, code);
+		m_definitionMap[td.id] = td;
+	}
+	
+	void parseCvQualifiedType(Element element)
+	{
+		TypeDefinition baseType = getType(element.tag.attr["type"]);
+		string code = format("const %s", baseType.code);
+		auto td = new TypeDefinition(element, code);
+		m_definitionMap[td.id] = td;
+	}
+	
+	void parseTypedef(Element element)
+	{
+		TypeDefinition baseType = getType(element.tag.attr["type"]);
+		string code = format("const %s", baseType.code);
+		auto td = new TypeDefinition(element, code);
+		m_definitionMap[td.id] = td;
+	}
+	
+	void parseStruct(Element element)
+	{
+		string prefix;
+		
+		if(element.tag.name == "Union")
+		{
+			prefix = "union %s {\n";
+		}
+		else
+		{
+			prefix = "struct %s {\n";
+		}
+	
+		string code = format(prefix, getName(element));
+		
+		string[] members = getMembers(element);
+		
+		foreach(string member; members)
+		{
+			Element field = m_elementMap[member];
+			assert(field.tag.name == "Field");
+			TypeDefinition type = getType(field.tag.attr["type"]);
+			code ~= format("%s %s;\n", safeName(field.tag.attr["name"]), type.code);
+		}
+		
+		code ~= "}\n";
+		
+		auto td = new TypeDefinition(element, code);
+		m_definitionMap[td.id] = td;
+	}
 }
 
 class TypeDefinition
