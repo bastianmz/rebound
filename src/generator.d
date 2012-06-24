@@ -43,11 +43,7 @@ version(Standalone)
 		Generator g = new Generator(xmlFile, headerFile);
 		g.generate();
 		writefln("// Generated output");
-	
-		foreach(TypeDefinition definition; g.types)
-		{
-			writefln(definition.code);
-		}		
+		writefln(g.code);
 		
 		return 0;
 	}
@@ -66,25 +62,33 @@ public:
 
 	void generate()
 	{
+		dhead = "extern(C):\n";
+		
 		foreach(Element element; document.elements)
 		{
-			if(shouldParse(element))
+			switch(element.tag.name)
 			{
-				parseElement(element);
-				
-				if(element.tag.attr["id"] in m_definitionMap)
-				{
-					m_types ~= m_definitionMap[element.tag.attr["id"]];
-				}
-			}
-		}
-		
-		// TODO: sort types array.
+				case "Namespace":
+					parseNamespace(element);
+					break;
+
+				case "Typedef":
+					parseTypedef(element);
+					break;
+
+				case "Enumeration":
+					parseEnumeration(element);
+					break;
+
+				default:
+					break;
+			}	
+		}		
 	}
 
-	@property TypeDefinition[] types()
+	@property string code()
 	{
-		return m_types;	
+		return dhead ~ dtail;	
 	}
 
 private:
@@ -92,8 +96,9 @@ private:
 	Element[string] m_elementMap;
 	Element m_fileElement;
 	string m_headerFile;
-	TypeDefinition[string] m_definitionMap;
-	TypeDefinition[] m_types;
+	string dhead;
+	string dtail;
+	string cout;
 	
 	void initialiseElementMap()
 	{
@@ -136,16 +141,24 @@ private:
 		return safeName(element.tag.attr["mangled"]);
 	}
 	
-	string[] getMembers(Element element)
+	string getDemangled(Element element)
 	{
-		string[] members;
-		
-		if("members" in element.tag.attr)
+		if("demangled" in element.tag.attr)
 		{
-			members = split(element.tag.attr["members"]);
+			return element.tag.attr["demangled"];
 		}
 		
-		return members;
+		return element.tag.attr["name"];
+	}
+
+	string getMangled(Element element)
+	{
+		if("mangled" in element.tag.attr)
+		{
+			return element.tag.attr["mangled"];
+		}
+		
+		return element.tag.attr["name"];
 	}
 	
 	bool shouldParse(Element element)
@@ -177,225 +190,481 @@ private:
 		return false;
 	}
 	
-	TypeDefinition getType(string id)
+	void parseNamespace(Element element)
 	{
-		if(id in m_definitionMap)
+		parseMembers(element, false, true);
+		parseMembers(element, false, false);		
+	}
+	
+	void parseMembers(Element element, bool inclass, bool types)
+	{
+		if("members" !in element.tag.attr)
 		{
-			return m_definitionMap[id];
+			return;
 		}
 		
-		assert(id in m_elementMap, format("Type id %s is not contained in the element map.", id));
-		parseElement(m_elementMap[id]);
-		assert(id in m_definitionMap, format("Type id %s is not contained in the type definition map.", id));
-		return m_definitionMap[id];
+		string[] members = split(element.tag.attr["members"]);
+		
+		foreach (member; members)
+		{
+			parseElement(m_elementMap[member], inclass, types);
+		}		
 	}
-
-	void parseElement(Element element)
+	
+	void parseElement(Element element, bool inclass, bool types)
 	{
+		if(!shouldParse(element))
+		{
+			return;
+		}		
+		
 		switch(element.tag.name)
 		{
-			case "FundamentalType":
-				parseFundamentalType(element);
-				break;
-
-			case "PointerType":
-				parsePointerType(element);
-				break;
-
-			case "ArrayType":
-
-				break;
-				
-			case "ReferenceType":
-			
-				break;
-				
-			case "CvQualifiedType":
-				parseCvQualifiedType(element);
-				break;
-			
-			case "FunctionType":
-				break;
-			
-            case "Enumeration":
-                parseEnumeration(element);
-				break;
-            
 			case "Struct":
 			case "Union":
-                parseStruct(element);
+				parseStruct(element);			
 				break;
-				
-            case "Function":
-			    parseFunction(element);
+
+			case "Variable":
+			case "Field":			
+				parseVariable(element, inclass);
+				break;
+			
+			case "Function":
+				parseFunction(element);
 				break;
 			
 			case "Typedef":
-			    
+				parseTypedef(element);
+				break;
+				
+            case "Enumeration":
+				parseEnumeration(element);
 				break;
 
 			default:
 				writefln("I don't know how to parse the element %s.", element.tag.name);
 				break;
 		}	
+	}	
+	
+	void parseStruct(Element element)
+	{
+		string name = getName(element);
+		string mangled = getMangled(element);
+		string demangled = getDemangled(element);
+		
+		if (element.tag.name == "Union") {
+			dtail ~= "union ";
+		} else {
+			dtail ~= "struct ";
+		}
+		dtail ~= name ~ " {\n";
+		
+		parseMembers(element, true, false);
+		dtail ~= "}\n";
 	}
 	
-	void parseFundamentalType(Element element)
+	void parseVariable(Element element, bool inclass)
 	{
-		string name = element.tag.attr["name"];
-	
-		foreach(string[2] typename; fundamentalTypeMap)
-		{
-			if(name == typename[0])
-			{
-				auto td = new TypeDefinition(element, typename[1]);
-				m_definitionMap[element.tag.attr["id"]] = td;
-				return;
-			}
-		}
-		
-		assert(0, "Unrecognised FundamentalType value: " ~ name);
+		ParsedType type = parseType(element.tag.attr["type"]);
+		string name = getName(element);
+       
+        dtail ~= type.DType ~ " " ~ safeName(name) ~ ";\n";
 	}
 	
 	void parseFunction(Element element)
 	{
-
-	}
-	
-	void parseEnumeration(Element element)
-	{
-		string code = format("enum %s {\n", safeName(element.tag.attr["name"]));
+		string name = getName(element);
+		string mangled = getMangled(element);
+		string demangled = getDemangled(element);
+		ParsedType type = parseType(element.tag.attr["returns"]);
 		
-		foreach(Element enumValue; element.elements)
-		{
-			if(enumValue.tag.name != "EnumValue")
-			{
-				continue;
-			}
-			
-			code ~= format("\t%s = %s,\n", safeName(enumValue.tag.attr["name"]), enumValue.tag.attr["init"]);
+		string Dargs;
+		string Deargs;
+		string Cargs;
+		string Dcall;
+		string Ccall;
+		
+		// the demangled name includes ()
+		auto demparen = indexOf(demangled, '(');
+		if (demparen != -1) {
+			demangled = demangled[0..demparen];
 		}
 		
-		code ~= "}\n";
-		
-		auto td = new TypeDefinition(element, code);
-		m_definitionMap[td.id] = td;
+		parseArguments(element, Dargs, Deargs, Cargs, Dcall, Ccall);
+		parseFunctionBody(element, safeName(name), mangled, demangled, type,
+							Dargs, Deargs, Cargs, Dcall, Ccall);
 	}
 	
-	void parsePointerType(Element element)
+	void parseArguments(Element element, ref string Dargs, ref string Deargs,
+                     ref string Cargs, ref string Dcall,
+                     ref string Ccall)
 	{
-		TypeDefinition baseType = getType(element.tag.attr["type"]);
-		string code = format("%s *", baseType.code);
-		auto td = new TypeDefinition(element, code);
-		m_definitionMap[td.id] = td;
+		int onParam = 0;
+
+		foreach(Element argument; element.elements)
+		{
+			switch(argument.tag.name)
+			{
+				case "Argument":
+					ParsedType atype = parseType(argument.tag.attr["type"]);
+					string aname = getName(argument);
+					if (aname == "") aname = "_" ~ std.conv.to!string(onParam);
+					aname = safeName(aname);
+					
+					if (Dargs != "") {
+						Dargs ~= ", ";
+					}
+					Dargs ~= atype.DType ~ " " ~ aname;
+					
+					if (atype.isClass || atype.isClassPtr) {
+						// this becomes a void * in D's view
+						if (Deargs != "") {
+							Deargs ~= ", ";
+						}
+						Deargs ~= "void*" ~ aname;
+					} else {
+						if (Deargs != "") {
+							Deargs ~= ", ";
+						}
+						Deargs ~= atype.DType ~ " " ~ aname;
+					}
+					
+					if (Cargs != "") {
+						Cargs ~= ", ";
+					}
+					Cargs ~= atype.CType ~ " " ~ aname;
+					
+					if (Dcall != "") {
+						Dcall ~= ", ";
+					}
+					Dcall ~= aname;
+					if (atype.isClass || atype.isClassPtr) {
+						// turn this into the real info
+						Dcall ~= ".__C_data";
+					}
+					
+					if (atype.isClass) {
+						// need to dereference
+						if (Ccall != "") {
+							Ccall ~= ", ";
+						}
+						Ccall ~= "*" ~ aname;
+					} else {
+						if (Ccall != "") {
+							Ccall ~= ", ";
+						}
+						Ccall ~= aname;
+					}
+					break;
+					
+				case "Ellipsis":
+					if (Dargs != "") {
+						Dargs ~= ", ";
+					}
+					Dargs ~= "...";
+					
+					if (Deargs != "") {
+						Deargs ~= ", ";
+					}
+					Deargs ~= "...";
+					
+					if (Cargs != "") {
+						Cargs ~= ", ";
+					}
+					Cargs ~= "...";
+					
+					if (Dcall != "") {
+						Dcall ~= ", ";
+					}
+					Dcall ~= "...";
+					
+					if (Ccall != "") {
+						Ccall ~= ", ";
+					}
+					Ccall ~= "...";
+					
+				default:
+					writefln("I don't know how to parse %s!", argument.tag.name);
+					break;
+			}
+				
+			onParam++;
+		}
 	}
-	
-	void parseCvQualifiedType(Element element)
+
+	void parseFunctionBody(Element element, string name, string mangled, string demangled, ParsedType type,
+							 string Dargs, string Deargs, string Cargs, string Dcall, string Ccall)
 	{
-		TypeDefinition baseType = getType(element.tag.attr["type"]);
-		string code = format("const %s", baseType.code);
-		auto td = new TypeDefinition(element, code);
-		m_definitionMap[td.id] = td;
+		dhead ~= type.DType ~ " " ~ demangled ~ "(" ~ Deargs ~ ");\n";
 	}
 	
 	void parseTypedef(Element element)
 	{
-		TypeDefinition baseType = getType(element.tag.attr["type"]);
-		string code = format("const %s", baseType.code);
-		auto td = new TypeDefinition(element, code);
-		m_definitionMap[td.id] = td;
+		static bool[string] handledTypedefs;
+		
+		auto pt = parseType(element.tag.attr["type"]);
+		string aname = getName(element);
+		string type = element.tag.attr["id"];
+		
+		if (!(type in handledTypedefs))
+		{
+			handledTypedefs[type] = true;
+			
+			cout ~= "typedef " ~ pt.CType ~ " _rebound_" ~ aname ~ ";\n";
+			
+			if (element.tag.attr["file"] == m_fileElement.tag.attr["id"])
+				dhead ~= "alias " ~ pt.DType ~ " " ~ aname ~ ";\n";
+		}
 	}
-	
-	void parseStruct(Element element)
+
+	void parseEnumeration(Element element)
 	{
-		string prefix;
+		static bool[string] handledEnums;
 		
-		if(element.tag.name == "Union")
-		{
-			prefix = "union %s {\n";
+		string aname = getName(element);
+		if (aname == "") return;
+		string type = element.tag.attr["id"];
+		
+		// make an enum in D as well
+		if (!(type in handledEnums)) {
+			handledEnums[type] = true;
+			
+			if (element.tag.attr["file"] != m_fileElement.tag.attr["id"]) return;
+			if (aname[0] == '.') return;
+			
+			dhead ~= "enum " ~ safeName(aname) ~ " {\n";
+			
+			foreach(Element childElement; element.elements)
+			{
+				if(childElement.tag.name == "EnumValue")
+				{
+					dhead ~= safeName(getName(childElement)) ~ " = " ~
+							 childElement.tag.attr["init"] ~ ",\n";
+				}
+				else
+				{
+					writefln("I don't know how to parse %s!", childElement.tag.name);
+				}
+			}
+
+			dhead ~= "}// parseEnumeration(" ~ type ~ ")\n";
 		}
-		else
+	}
+
+	/**
+	 * Get the type of a node in C[++] and D
+	 */
+	ParsedType parseType(string type)
+	{
+		auto element = m_elementMap[type];
+
+		switch(element.tag.name)
 		{
-			prefix = "struct %s {\n";
+			case "FundamentalType":
+				string ctype = getName(element);
+				
+				foreach(string[2] typename; fundamentalTypeMap)
+				{
+					if(ctype == typename[0])
+					{
+						return new ParsedType(ctype, typename[1]);
+					}
+				}
+				
+				writefln("I don't know how translate %s to D.", ctype);
+				return new ParsedType("void*", "void*");	
+			
+			case "PointerType":
+				auto baseType = parseType(element.tag.attr["type"]);
+				// functions and classes are already pointers
+				if (!baseType.isClass && !baseType.isFunction) {
+					baseType.CType ~= "*";
+					baseType.DType ~= "*";
+				} else if (baseType.isClass) {
+					ParsedType pt = new ParsedType(baseType);
+					pt.DType ~= "*";
+					pt.isClassPtr = true;
+					return pt;
+				}
+				
+				return new ParsedType(baseType);
+			
+			case "ArrayType":
+				auto baseType = parseType(element.tag.attr["type"]);
+				int size = std.c.stdlib.atoi(element.tag.attr["max"].toStringz()) + 1;
+				baseType.CType = "_rebound_array_" ~ type;
+				baseType.DType ~= "[" ~ std.conv.to!string(size) ~ "]";		
+				return new ParsedType(baseType);
+				
+			case "ReferenceType":
+				auto baseType = parseType(element.tag.attr["type"]);
+				
+				if (!baseType.isClass)
+				{
+					baseType.CType ~= "&";
+					baseType.DType ~= "*";
+				} 
+				else
+				{
+					// we need to treat this as a pointer in D, but a reference in C
+					
+					// 1) cut off the *
+					baseType.CType = baseType.CType[0 .. baseType.CType.length - 1];
+					
+					// 2) add the &
+					baseType.CType ~= "&";
+					
+					ParsedType pt = new ParsedType(baseType);
+					pt.isClassPtr = true;
+					return pt;
+				}
+				
+				return new ParsedType(baseType);
+			
+			case "Struct":
+			case "Class":
+				string className = element.tag.attr["demangled"];
+				ParsedType pt;
+				
+				// can't have incomplete types in D, so call it a BoundClass in D
+				if ("incomplete" in element.tag.attr) {
+					pt = new ParsedType(className ~ "*",
+										"rebound.bind.BoundClass");
+				} else {
+					pt = new ParsedType(className ~ "*",
+										safeName(getName(element)));
+				}
+				pt.className = className;
+				pt.isClass = true;
+				return pt;
+			
+			case "Union":
+				string className = element.tag.attr["demangled"];
+				
+				if ("incomplete" in element.tag.attr)
+				{
+					return new ParsedType("union " ~ className,
+										  "void");
+				} 
+				else 
+				{
+					return new ParsedType("union " ~ className,
+										  safeName(getName(element)));
+				}
+				
+			case "CvQualifiedType":
+				// this is just a const
+				auto pt = parseType(element.tag.attr["type"]);
+				if (pt.CType.length < 6 ||
+					pt.CType[0..6] != "const ")
+					pt.CType = "const " ~ pt.CType;
+				return pt;
+				
+			case "Typedef":
+				// this is also an alias, but we should replicate it in D
+				auto pt = parseType(element.tag.attr["type"]);
+				string aname = getName(element);
+				
+				//parseTypedef(element);
+				
+				ParsedType rpt = new ParsedType("_rebound_" ~ aname, pt.DType);
+				rpt.isClass = pt.isClass;
+				rpt.isFunction = pt.isFunction;
+				return rpt;
+				
+			case "FunctionType":
+				// make a typedef and an alias
+				static bool[string] handledFunctions;
+				
+				if (!(type in handledFunctions)) {
+					handledFunctions[type] = true;
+					
+					auto pt = parseType(element.tag.attr["returns"]);
+					string couta, dheada;
+					
+					bool first = true;
+					couta = "typedef " ~ pt.CType ~
+					" (*_rebound_func_" ~ type ~ ")(";
+					dheada = "alias " ~ pt.DType ~ " function(";
+					
+					// now look for arguments
+					foreach(Element argument; element.elements)
+					{
+						auto argType = parseType(argument.tag.attr["type"]);
+						
+						if (!first) {
+							couta ~= ", ";
+							dheada ~= ", ";
+						} else {
+							first = false;
+						}
+						
+						couta ~= argType.CType;
+						dheada ~= argType.DType;				
+					}
+					
+					cout ~= couta ~ ");\n";
+					dhead ~= dheada ~ ") _rebound_func" ~ type ~ ";\n";
+				}
+				
+				ParsedType pt = new ParsedType("_rebound_func" ~ type, "_rebound_func" ~ type);
+				pt.isFunction = true;
+				return pt;
+			 
+			case "Enumeration":
+				parseEnumeration(element);
+				
+				// if this is fake, ignore it
+				string aname = getName(element); 
+				if (aname[0] == '.') {
+					return new ParsedType("int", "int");
+				}
+				
+				/* we need the demangled name in C, but there is no demangled=
+				 * for enumerations, so we need the parent */
+				if("context" in element.tag.attr)
+				{
+					string scontext = element.tag.attr["context"];
+					Element pnode = m_elementMap[scontext];
+					string demangled = getDemangled(pnode);
+					
+					if (demangled != "" && demangled != "::")
+					{
+						return new ParsedType("enum " ~ demangled ~ "::" ~ aname, "int");
+					}			
+				}
+				
+				return new ParsedType("enum " ~ aname, "int");
+
+			default:
+				writefln("I don't know how to parse the type %s.", element.tag.name);
+				return new ParsedType("void*", "void*");
 		}
-	
-		string code = format(prefix, getName(element));
-		
-		string[] members = getMembers(element);
-		
-		foreach(string member; members)
-		{
-			Element field = m_elementMap[member];
-			assert(field.tag.name == "Field");
-			TypeDefinition type = getType(field.tag.attr["type"]);
-			code ~= format("%s %s;\n", safeName(field.tag.attr["name"]), type.code);
-		}
-		
-		code ~= "}\n";
-		
-		auto td = new TypeDefinition(element, code);
-		m_definitionMap[td.id] = td;
 	}
 }
 
-class TypeDefinition
-{
-public:
-	this(Element element, string code)
-	{
-		m_code = code;
-		m_element = element;
-	}
-
-	@property
-	{
-		string id()
-		{
-			return m_element.tag.attr["id"];
-		}
-		
-		string name()
-		{
-			return m_element.tag.attr["name"];
-		}
-		
-		string file()
-		{
-			return m_element.tag.attr["file"];
-		}
-
-		string line()
-		{
-			return m_element.tag.attr["line"];
-		}
-		
-		string code()
-		{
-			return m_code;
-		}
-	}
-	
-	string toString()
-	{
-		return m_code;
-	}
-	
-	override int opCmp(Object o)
-	{
-		auto other = cast(TypeDefinition) o;
-		int result = std.algorithm.cmp(file, other.file);
-	
-		if(result != 0)
-		{
-			return result;
-		}
-	
-		return std.algorithm.cmp(line, other.line);
-	}
-
-protected:	
-	Element m_element;
-	string m_code;	
+/**
+ * A type in both C[++] and D
+ */
+class ParsedType {
+    this(string sCType, string sDType)
+    {
+        CType = sCType;
+        DType = sDType;
+    }
+    this(ParsedType copy)
+    {
+        CType = copy.CType;
+        DType = copy.DType;
+    }
+    string CType;
+    string DType;
+    string className;
+    bool isClass;
+    bool isClassPtr;
+    bool isFunction;
 }
 
 private string[2][16] fundamentalTypeMap = 

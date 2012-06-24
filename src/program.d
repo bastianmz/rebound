@@ -65,6 +65,7 @@ int main(string[] args)
 	auto g = new Generator("out.xml", parameters.file);
 	g.generate();
 
+	writeOutput(parameters, g.code);
 	
 	return 0;
 }
@@ -199,4 +200,20 @@ bool generateXml()
 	
 	writefln("gccxml execution failed.");
 	return false;
+}
+
+void writeOutput(ref Parameters parameters, string data)
+{
+	string filename = parameters.moduleName ~ ".d";
+	
+	auto f = File(filename, "w");
+	f.write(format("module %s;\n\n", parameters.moduleName));
+	
+	foreach(string importModule; parameters.importModules)
+	{
+		f.write(format("import %s;\n", importModule));
+	}
+	
+	f.write(data);
+	f.close();
 }
